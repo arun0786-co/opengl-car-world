@@ -38,6 +38,7 @@
 //   9) add keyboard callbacks for car control and camera switching
 //   10) main loop
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -2862,6 +2863,8 @@ static void draw_hud()
   ImGui::Text("Car Heading: %.1f deg", g_car.heading_deg);
   ImGui::Text("Fan RPM: %.0f", g_fan_rpm);
   ImGui::Text("Shadows: %s", g_shadows ? "on" : "off");
+  ImGui::Text("Frame: %.2f ms (%.0f fps)", 1000.0f / ImGui::GetIO().Framerate,
+              ImGui::GetIO().Framerate);
 
   // show time of day
   // show time of day based on celestial state
@@ -3086,6 +3089,7 @@ struct Options
   float sun = -1.0f;          // sun progress 0..1 (negative keeps the default)
   float moon = -1.0f;         // moon progress 0..1
   int shadows = 1;
+  int bench = 0;              // frames to time offscreen, 0 = off
   int width = 1600, height = 900;
 };
 
@@ -3093,7 +3097,7 @@ static void usage()
 {
   cerr << "usage: car_world [--shot out.png] [--camera 0-8] [--seconds t]\n"
           "                 [--drive speed] [--sun p | --moon p] [--size WxH]\n"
-          "                 [--shadows 0|1]\n";
+          "                 [--shadows 0|1] [--bench frames]\n";
 }
 
 static bool parse_options(int argc, char *argv[], Options &o)
@@ -3118,6 +3122,8 @@ static bool parse_options(int argc, char *argv[], Options &o)
       o.moon = float(atof(v));
     else if (a == "--shadows")
       o.shadows = atoi(v);
+    else if (a == "--bench")
+      o.bench = atoi(v);
     else if (a == "--size")
     {
       if (sscanf(v, "%dx%d", &o.width, &o.height) != 2)
@@ -3150,8 +3156,30 @@ static void apply_options(const Options &o)
   }
 }
 
+// renders frames offscreen at a fixed 60 Hz simulation step and
+// reports the mean time per frame. glFinish waits for the gpu, so the
+// number covers the whole frame, not just the cpu side.
+static void bench_frames(int frames)
+{
+  const float step = 1.0f / 60.0f;
+  render_frame(); // warm up: shader compile, texture upload
+  glFinish();
+  double t0 = glfwGetTime();
+  for (int i = 0; i < frames; i++)
+  {
+    update_game(step);
+    render_frame();
+    glFinish();
+  }
+  double ms = (glfwGetTime() - t0) * 1000.0 / frames;
+  cout << "frames " << frames << "  " << g_fb_w << "x" << g_fb_h
+       << "  shadows " << (g_shadows ? "on" : "off") << "  " << ms
+       << " ms/frame\n";
+}
+
 // draws one frame into an offscreen framebuffer and writes it as a png
-static bool capture_png(const char *path, int w, int h)
+// (or, with frames > 0, times that many frames instead)
+static bool capture_png(const char *path, int w, int h, int frames = 0)
 {
   GLuint fbo = 0, color = 0, depth = 0;
   glGenFramebuffers(1, &fbo);
@@ -3176,6 +3204,11 @@ static bool capture_png(const char *path, int w, int h)
   g_fb_w = w;
   g_fb_h = h;
   g_show_hud = false;
+  if (frames > 0)
+  {
+    bench_frames(frames);
+    return true;
+  }
   render_frame();
   glFinish();
 
@@ -3212,7 +3245,8 @@ int main(int argc, char *argv[])
     return EXIT_FAILURE;
   }
 
-  if (!init_glfw_and_window(1280, 720, opt.shot == nullptr))
+  bool headless = opt.shot != nullptr || opt.bench > 0;
+  if (!init_glfw_and_window(1280, 720, !headless))
   {
     return EXIT_FAILURE;
   }
@@ -3231,9 +3265,9 @@ int main(int argc, char *argv[])
   init_world();
   apply_options(opt);
 
-  if (opt.shot)
+  if (headless)
   {
-    bool ok = capture_png(opt.shot, opt.width, opt.height);
+    bool ok = capture_png(opt.shot, opt.width, opt.height, opt.bench);
     glfwTerminate();
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
   }
