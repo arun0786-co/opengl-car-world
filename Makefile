@@ -20,7 +20,15 @@ car_world: $(OBJS)
 	$(CXX) $(OBJS) $(LDLIBS) -o $@
 
 clean:
-	rm -f car_world $(OBJS) $(OBJS:.o=.d)
+	rm -f car_world tests/test_collide $(OBJS) $(OBJS:.o=.d)
 
 .PHONY: clean
 -include $(OBJS:.o=.d)
+
+tests/test_collide: tests/test_collide.cpp src/collide.h
+	$(CXX) -std=c++17 -O2 -Wall $< -o $@
+
+test: tests/test_collide
+	./tests/test_collide
+
+.PHONY: test

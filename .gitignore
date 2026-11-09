@@ -4,3 +4,4 @@
 imgui.ini
 .DS_Store
 /shots/
+/tests/test_collide
