@@ -52,6 +52,7 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
+#include "collide.h"
 #include "file_utils.h"
 #include "math_utils.h"
 #include "png.h"
@@ -1407,65 +1408,43 @@ static void init_world()
 // this is the "brain" of the program. no rendering happens here,
 // only numbers are updated each frame.
 
+// every collision test treats both objects as rectangles seen from
+// above, turned by their heading (see collide.h). buildings, trees and
+// humans are axis aligned; cars turn.
+static Rect2 car_rect(const Car &car)
+{
+  return {car.x, car.z, car.half_length, car.half_width, car.heading_deg};
+}
+
 static bool check_car_building_collision(const Car &car, const Building &bld)
 {
-  // proper axis-aligned bounding box (aabb) collision.
-  // instead of using a single circle radius (which is too generous),
-  // i check overlap on each axis independently using the actual
-  // half_length and half_width of the car and building.
-  // this gives a tight rectangular hit box.
-  float bld_half_w = bld.width * 0.5f;
-  float bld_half_d = bld.depth * 0.5f;
-
-  bool overlap_x = std::abs(car.x - bld.x) < (car.half_length + bld_half_w);
-  bool overlap_z = std::abs(car.z - bld.z) < (car.half_width + bld_half_d);
-
-  return overlap_x && overlap_z;
+  return rects_overlap(car_rect(car),
+                       {bld.x, bld.z, bld.width * 0.5f, bld.depth * 0.5f});
 }
 
 static bool check_car_wall_collision(const Car &car)
 {
-  // check each wall with the car's actual size, not a bloated circle
-  float hl = car.half_length;
-  float hw = car.half_width;
-  float r =
-      std::max(hl, hw); // still use max for walls since car can be rotated
-  if (car.x - r < 0.0f || car.x + r > ARENA_WIDTH)
-    return true;
-  if (car.z - r < 0.0f || car.z + r > ARENA_DEPTH)
-    return true;
-  return false;
+  return rect_outside(car_rect(car), ARENA_WIDTH, ARENA_DEPTH);
 }
 
 static bool check_car_ai_collision(const Car &car, const AICar &ai)
 {
-  // tight aabb between player car and ai car
-  float ai_half_l = CAR_LENGTH * 0.5f;
-  float ai_half_w = CAR_WIDTH * 0.5f;
-  float dist_x = std::abs(car.x - ai.x);
-  float dist_z = std::abs(car.z - ai.z);
-  return (dist_x < car.half_length + ai_half_l) &&
-         (dist_z < car.half_width + ai_half_w);
+  return rects_overlap(car_rect(car), {ai.x, ai.z, CAR_LENGTH * 0.5f,
+                                       CAR_WIDTH * 0.5f, ai.heading_deg});
 }
 
 // check if the car overlaps with a tree trunk
 static bool check_car_tree_collision(const Car &car, const Tree &tree)
 {
   float trunk_half = TREE_TRUNK_THICK * 0.5f;
-  float dist_x = std::abs(car.x - tree.x);
-  float dist_z = std::abs(car.z - tree.z);
-  return (dist_x < car.half_length + trunk_half) &&
-         (dist_z < car.half_width + trunk_half);
+  return rects_overlap(car_rect(car), {tree.x, tree.z, trunk_half, trunk_half});
 }
 
 // check if the car overlaps with a standing human
 static bool check_car_human_collision(const Car &car, const Human &human)
 {
   float human_half = 0.15f; // a human is roughly 0.3 units wide
-  float dist_x = std::abs(car.x - human.x);
-  float dist_z = std::abs(car.z - human.z);
-  return (dist_x < car.half_length + human_half) &&
-         (dist_z < car.half_width + human_half);
+  return rects_overlap(car_rect(car), {human.x, human.z, human_half, human_half});
 }
 
 static void update_game(float dt)
