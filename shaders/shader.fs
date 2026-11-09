@@ -72,6 +72,11 @@ const int MAX_POINT_LIGHTS = 16;
 uniform int uNumPointLights;
 uniform vec3 uPointLightPos[MAX_POINT_LIGHTS];
 uniform vec3 uPointLightColor[MAX_POINT_LIGHTS];
+// every point light is a spotlight: it shines along uPointLightDir,
+// at full strength inside the inner cone and fading to zero at the
+// outer cone. uPointLightCone holds cos(inner), cos(outer).
+uniform vec3 uPointLightDir[MAX_POINT_LIGHTS];
+uniform vec2 uPointLightCone[MAX_POINT_LIGHTS];
 
 // shadow map from the sun's point of view
 uniform sampler2DShadow uShadowMap;
@@ -177,6 +182,11 @@ void main()
 
         // attenuation: light intensity falls off with distance squared
         float attenuation = 1.0 / (1.0 + plDist * plDist * 0.05);
+
+        // spotlight cone: compare the angle between the light's axis and
+        // the direction to this fragment against the two cone angles
+        float cosAngle = dot(-plDir, normalize(uPointLightDir[i]));
+        attenuation *= smoothstep(uPointLightCone[i].y, uPointLightCone[i].x, cosAngle);
 
         // diffuse from this point light
         float plDiff = max(dot(normal, plDir), 0.0);

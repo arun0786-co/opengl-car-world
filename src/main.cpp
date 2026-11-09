@@ -143,6 +143,16 @@ float g_fan_rpm = 8.0f;        // fan rotation speed (slower, more realistic)
 const float LIGHT_SWING_MAX = 30.0f;  // max swing angle in degrees
 const float LIGHT_SWING_SPEED = 0.5f; // speed of swivel (slower now)
 
+// the gimbal lamps are spotlights aimed at the nearest point of the
+// road; street lamps are wide spotlights pointing straight down.
+// angles are the cone half angles where the light starts fading and
+// where it reaches zero.
+const float LAMP_INNER_DEG = 10.0f;
+const float LAMP_OUTER_DEG = 16.0f;
+const float LAMP_INTENSITY = 3.0f;
+const float STREET_INNER_DEG = 35.0f;
+const float STREET_OUTER_DEG = 60.0f;
+
 // street light parameters
 // street lights are placed along the road at regular intervals.
 // each has a thin pole and a warm white light on top.
@@ -212,6 +222,8 @@ GLint g_shininess_location = -1;   // material shininess
 GLint g_num_point_lights_location = -1;
 GLint g_point_light_pos_locations[16];
 GLint g_point_light_color_locations[16];
+GLint g_point_light_dir_locations[16];  // spotlight axis
+GLint g_point_light_cone_locations[16]; // cos of inner and outer angle
 
 // texture uniforms
 GLint g_use_texture_location = -1; // toggle texture sampling on/off
@@ -317,6 +329,8 @@ struct Building
   float light_swing_dir; // +1 or -1 (swinging right or left)
   float light_r, light_g,
       light_b; // light color (each building gets a different one)
+
+  float aim_x, aim_z; // nearest point of the road center line to the lamp
 };
 
 Building g_buildings[NUM_BUILDINGS];
@@ -499,6 +513,12 @@ static void create_shader_program()
         glGetUniformLocation(g_shader_program, buf);
     snprintf(buf, sizeof(buf), "uPointLightColor[%d]", i);
     g_point_light_color_locations[i] =
+        glGetUniformLocation(g_shader_program, buf);
+    snprintf(buf, sizeof(buf), "uPointLightDir[%d]", i);
+    g_point_light_dir_locations[i] =
+        glGetUniformLocation(g_shader_program, buf);
+    snprintf(buf, sizeof(buf), "uPointLightCone[%d]", i);
+    g_point_light_cone_locations[i] =
         glGetUniformLocation(g_shader_program, buf);
   }
 
@@ -1296,12 +1316,74 @@ static void init_humans()
   g_humans[7].shirt_b = 0.9f;
 }
 
+// the gimbal lamp sits on a short pole at the road side of the roof
+static void lamp_position(const Building &b, float &x, float &y, float &z)
+{
+  float to_road_x = TRACK_CX - b.x;
+  float to_road_z = TRACK_CZ - b.z;
+  float len = sqrt(to_road_x * to_road_x + to_road_z * to_road_z);
+  if (len > 0.001f)
+  {
+    to_road_x /= len;
+    to_road_z /= len;
+  }
+  else
+  {
+    to_road_x = 1.0f;
+    to_road_z = 0.0f;
+  }
+  x = b.x + to_road_x * (b.width * 0.4f);
+  z = b.z + to_road_z * (b.depth * 0.4f);
+  y = b.stories * STORY_HEIGHT + 0.7f;
+}
+
+// each lamp rests (swing 0) pointing at the closest point of the road
+// center line, found by sampling the track curve
+static void init_lamp_aims()
+{
+  for (int i = 0; i < NUM_BUILDINGS; i++)
+  {
+    float lx, ly, lz;
+    lamp_position(g_buildings[i], lx, ly, lz);
+    float best = 1e9f;
+    for (int k = 0; k < 2000; k++)
+    {
+      float t = 2.0f * float(M_PI) * k / 2000.0f;
+      float px, pz;
+      track_point(t, px, pz);
+      float d = (px - lx) * (px - lx) + (pz - lz) * (pz - lz);
+      if (d < best)
+      {
+        best = d;
+        g_buildings[i].aim_x = px;
+        g_buildings[i].aim_z = pz;
+      }
+    }
+  }
+}
+
+// spotlight axis of lamp i: the rest direction turned about the
+// vertical by the current swing angle
+static Vector3f lamp_direction(const Building &b)
+{
+  float lx, ly, lz;
+  lamp_position(b, lx, ly, lz);
+  float dx = b.aim_x - lx, dz = b.aim_z - lz;
+  float a = b.light_swing_deg * float(M_PI) / 180.0f;
+  float rx = dx * cos(a) - dz * sin(a);
+  float rz = dx * sin(a) + dz * cos(a);
+  Vector3f d(rx, -ly, rz);
+  d.Normalize();
+  return d;
+}
+
 static void init_world()
 {
   // setting up the initial state of the world here.
   // i want to make sure the game starts with everything in a clean state
   // before the first frame is rendered, so everything is placed nicely.
   init_buildings();
+  init_lamp_aims();
   init_car();
   init_ai_cars();
   init_street_lights();
@@ -1846,35 +1928,22 @@ static void upload_lighting()
   int total_lights = NUM_BUILDINGS + NUM_STREET_LIGHTS;
   glUniform1i(g_num_point_lights_location, total_lights);
 
-  // building gimbal lights
+  // building gimbal lights: narrow colored spotlights
+  float lamp_inner = cos(LAMP_INNER_DEG * M_PI / 180.0f);
+  float lamp_outer = cos(LAMP_OUTER_DEG * M_PI / 180.0f);
   for (int i = 0; i < NUM_BUILDINGS; i++)
   {
-    float bld_top_y = g_buildings[i].stories * STORY_HEIGHT;
-
-    // gimbal is at the front of the building, elevated on a pole
-    float to_road_x = TRACK_CX - g_buildings[i].x;
-    float to_road_z = TRACK_CZ - g_buildings[i].z;
-    float tr_len = sqrt(to_road_x * to_road_x + to_road_z * to_road_z);
-    if (tr_len > 0.001f)
-    {
-      to_road_x /= tr_len;
-      to_road_z /= tr_len;
-    }
-    else
-    {
-      to_road_x = 1.0f;
-      to_road_z = 0.0f;
-    }
-
-    float light_x =
-        g_buildings[i].x + to_road_x * (g_buildings[i].width * 0.4f);
-    float light_z =
-        g_buildings[i].z + to_road_z * (g_buildings[i].depth * 0.4f);
-    float light_y = bld_top_y + 0.7f;
+    float light_x, light_y, light_z;
+    lamp_position(g_buildings[i], light_x, light_y, light_z);
+    Vector3f d = lamp_direction(g_buildings[i]);
 
     glUniform3f(g_point_light_pos_locations[i], light_x, light_y, light_z);
-    glUniform3f(g_point_light_color_locations[i], g_buildings[i].light_r,
-                g_buildings[i].light_g, g_buildings[i].light_b);
+    glUniform3f(g_point_light_color_locations[i],
+                LAMP_INTENSITY * g_buildings[i].light_r,
+                LAMP_INTENSITY * g_buildings[i].light_g,
+                LAMP_INTENSITY * g_buildings[i].light_b);
+    glUniform3f(g_point_light_dir_locations[i], d.x, d.y, d.z);
+    glUniform2f(g_point_light_cone_locations[i], lamp_inner, lamp_outer);
   }
 
   // street lights: warm white, always on but brighter at night
@@ -1886,6 +1955,10 @@ static void upload_lighting()
                 STREET_LIGHT_HEIGHT + 0.1f, g_street_lights[i].z);
     glUniform3f(g_point_light_color_locations[idx], 0.9f * street_brightness,
                 0.8f * street_brightness, 0.5f * street_brightness);
+    glUniform3f(g_point_light_dir_locations[idx], 0.0f, -1.0f, 0.0f);
+    glUniform2f(g_point_light_cone_locations[idx],
+                cos(STREET_INNER_DEG * M_PI / 180.0f),
+                cos(STREET_OUTER_DEG * M_PI / 180.0f));
   }
 }
 
