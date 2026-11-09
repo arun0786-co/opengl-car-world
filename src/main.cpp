@@ -380,15 +380,20 @@ bool g_celestial_is_sun = true;    // start with the sun
 float g_celestial_spin_deg = 0.0f; // fast z-axis spin to blur cube into sphere
 
 // camera state
-// 9 cameras total:
+// 10 cameras total:
 //   0: sky view (overhead)
 //   1: car view (on roof, looking forward)
 //   2: ground view (near a building, pan left/right)
 //   3-7: light source view from each building's gimbal
 //   8: helicopter cam (behind and above the car)
+//   9: orbit view (circles the arena, arrows turn it)
 int g_current_camera = 0;
-const int NUM_CAMERAS = 9;
+const int NUM_CAMERAS = 10;
 float g_ground_cam_pan_deg = 0.0f;
+const float ORBIT_RADIUS = 34.0f;
+const float ORBIT_HEIGHT = 20.0f;
+const float ORBIT_SPEED_DEG = 6.0f; // degrees per second
+float g_orbit_deg = 90.0f;
 
 // store camera eye position for specular lighting calculations
 Vector3f g_camera_eye;
@@ -1625,6 +1630,9 @@ static void update_game(float dt)
       g_buildings[i].fan_angle_deg -= 360.0f;
   }
 
+  // the orbit camera drifts slowly around the arena
+  g_orbit_deg = fmod(g_orbit_deg + ORBIT_SPEED_DEG * dt, 360.0f);
+
   // swiveling gimbal light animation
   for (int i = 0; i < NUM_BUILDINGS; i++)
   {
@@ -1821,6 +1829,17 @@ static void setup_view_matrix()
                    g_car.z - forward_z * behind_dist);
 
     target_dir = Vector3f(g_car.x - eye.x, -above_dist * 0.3f, g_car.z - eye.z);
+    target_dir.Normalize();
+    up = Vector3f(0.0f, 1.0f, 0.0f);
+    break;
+  }
+
+  case 9: // orbit view, looking at the middle of the track
+  {
+    float a = g_orbit_deg * M_PI / 180.0f;
+    eye = Vector3f(TRACK_CX + ORBIT_RADIUS * cos(a), ORBIT_HEIGHT,
+                   TRACK_CZ + ORBIT_RADIUS * sin(a));
+    target_dir = Vector3f(TRACK_CX - eye.x, -5.0f - eye.y, TRACK_CZ - eye.z);
     target_dir.Normalize();
     up = Vector3f(0.0f, 1.0f, 0.0f);
     break;
@@ -2856,7 +2875,8 @@ static void draw_hud()
 
   const char *cam_names[] = {"Sky View", "Car View", "Ground View",
                              "Light B0", "Light B1", "Light B2",
-                             "Light B3", "Light B4", "Helicopter Cam"};
+                             "Light B3", "Light B4", "Helicopter Cam",
+                             "Orbit View"};
   ImGui::Text("Camera: %s (%d/%d)", cam_names[g_current_camera],
               g_current_camera + 1, NUM_CAMERAS);
   ImGui::Text("Car Speed: %.1f", g_car.speed);
@@ -2890,6 +2910,7 @@ static void draw_hud()
     ImGui::Text("3              : Ground view (arrows to pan)");
     ImGui::Text("4 to 8         : Light source view (per building)");
     ImGui::Text("9              : Helicopter cam");
+    ImGui::Text("0              : Orbit view (arrows turn it)");
     ImGui::Text("o              : Sun shadows on / off");
     ImGui::Text("n              : Reset world");
     ImGui::Text("Escape         : Quit");
@@ -2942,6 +2963,18 @@ static void key_callback(GLFWwindow *window, int key, int scancode, int action,
       g_current_camera = 7;
     if (key == GLFW_KEY_9)
       g_current_camera = 8;
+    if (key == GLFW_KEY_0)
+      g_current_camera = 9;
+  }
+
+  // the orbit camera turns with the arrow keys
+  if (g_current_camera == 9 &&
+      (action == GLFW_PRESS || action == GLFW_REPEAT))
+  {
+    if (key == GLFW_KEY_LEFT)
+      g_orbit_deg -= 5.0f;
+    if (key == GLFW_KEY_RIGHT)
+      g_orbit_deg += 5.0f;
   }
 
   // car speed controls
@@ -3083,21 +3116,22 @@ static bool init_glew()
 struct Options
 {
   const char *shot = nullptr; // png path
-  int camera = 0;             // 0 to 8, same order as the number keys
+  int camera = 0;             // 0 to 9 (keys 1-9 then 0)
   float seconds = 0.0f;       // simulated time before the frame is taken
   float drive = 0.0f;         // initial car speed
   float sun = -1.0f;          // sun progress 0..1 (negative keeps the default)
   float moon = -1.0f;         // moon progress 0..1
   int shadows = 1;
   int bench = 0;              // frames to time offscreen, 0 = off
+  float orbit = -1.0f;        // orbit camera angle in degrees
   int width = 1600, height = 900;
 };
 
 static void usage()
 {
-  cerr << "usage: car_world [--shot out.png] [--camera 0-8] [--seconds t]\n"
+  cerr << "usage: car_world [--shot out.png] [--camera 0-9] [--seconds t]\n"
           "                 [--drive speed] [--sun p | --moon p] [--size WxH]\n"
-          "                 [--shadows 0|1] [--bench frames]\n";
+          "                 [--shadows 0|1] [--bench frames] [--orbit deg]\n";
 }
 
 static bool parse_options(int argc, char *argv[], Options &o)
@@ -3124,6 +3158,8 @@ static bool parse_options(int argc, char *argv[], Options &o)
       o.shadows = atoi(v);
     else if (a == "--bench")
       o.bench = atoi(v);
+    else if (a == "--orbit")
+      o.orbit = float(atof(v));
     else if (a == "--size")
     {
       if (sscanf(v, "%dx%d", &o.width, &o.height) != 2)
@@ -3144,6 +3180,8 @@ static void apply_options(const Options &o)
   const float step = 1.0f / 60.0f;
   for (float t = 0.0f; t < o.seconds; t += step)
     update_game(step);
+  if (o.orbit >= 0.0f)
+    g_orbit_deg = o.orbit;
   if (o.sun >= 0.0f)
   {
     g_celestial_is_sun = true;
