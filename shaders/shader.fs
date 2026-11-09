@@ -28,6 +28,16 @@
 //   these add colored illumination to nearby surfaces and
 //   fall off with distance.
 //
+// shadows:
+//   the sun is the only light that casts shadows. before the main pass
+//   the scene is drawn once from the sun with an orthographic camera,
+//   keeping only depth (uDepthPass = 1). in the main pass each fragment
+//   is moved into that camera's space; if the shadow map holds a
+//   smaller depth there, something sits between it and the sun.
+//   sampler2DShadow does the depth comparison in hardware and filters
+//   the 4 nearest texels; 9 such taps on a 3x3 grid soften the edge
+//   (percentage closer filtering).
+//
 // texture mapping:
 //   when uUseTexture is 1, i sample a 2d texture at the fragment's
 //   uv coordinate and use that color instead of the solid uColor.
@@ -63,13 +73,46 @@ uniform int uNumPointLights;
 uniform vec3 uPointLightPos[MAX_POINT_LIGHTS];
 uniform vec3 uPointLightColor[MAX_POINT_LIGHTS];
 
+// shadow map from the sun's point of view
+uniform sampler2DShadow uShadowMap;
+uniform int uUseShadows;
+uniform int uDepthPass;
+uniform vec2 uShadowTexel; // 1 / shadow map size
+
 // inputs from vertex shader (interpolated across the triangle)
 in vec3 fragNormal;
 in vec3 fragWorldPos;
 in vec2 fragTexCoord;
+in vec4 fragLightPos;
+
+// fraction of the sun that reaches this fragment, 0 (shadow) to 1 (lit)
+float sun_visibility(vec3 normal, vec3 lightDir)
+{
+    if (uUseShadows == 0)
+        return 1.0;
+    vec3 p = fragLightPos.xyz / fragLightPos.w * 0.5 + 0.5;
+    if (p.z > 1.0)
+        return 1.0;
+    // surfaces at a grazing angle to the sun need a larger offset,
+    // or they shadow themselves in stripes (shadow acne)
+    float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
+    float bias = mix(0.0015, 0.0004, cosTheta);
+    float lit = 0.0;
+    for (int x = -1; x <= 1; x++)
+        for (int y = -1; y <= 1; y++)
+            lit += texture(uShadowMap, vec3(p.xy + vec2(x, y) * 1.5 * uShadowTexel, p.z - bias));
+    return lit / 9.0;
+}
 
 void main()
 {
+    // the shadow pass only needs depth
+    if (uDepthPass == 1)
+    {
+        diffuseColor = vec4(0.0);
+        return;
+    }
+
     // normalize the interpolated normal because interpolation
     // between vertices can change its length
     vec3 normal = normalize(fragNormal);
@@ -101,8 +144,9 @@ void main()
     //   0 when the surface is perpendicular
     // max() clamps negative values so back faces get zero light.
     vec3 lightDir = normalize(uLightDir);
+    float sun = sun_visibility(normal, lightDir);
     float diff = max(dot(normal, lightDir), 0.0);
-    vec3 diffuse = diff * uLightColor;
+    vec3 diffuse = diff * uLightColor * sun;
 
     // specular component from the directional light (blinn phong)
     // this creates bright shiny highlights on metallic surfaces.
@@ -118,7 +162,7 @@ void main()
     {
         spec = pow(max(dot(normal, halfwayDir), 0.0), uShininess);
     }
-    vec3 specular = spec * uLightColor;
+    vec3 specular = spec * uLightColor * sun;
 
     // point lights from building top lamps and street lights
     // each point light adds diffuse and specular based on distance.

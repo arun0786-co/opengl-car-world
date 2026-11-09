@@ -237,6 +237,24 @@ GLuint g_target_fbo = 0;
 int g_fb_w = 1280, g_fb_h = 720;
 bool g_show_hud = true;
 
+// sun shadow map
+// the sun is rendered from an orthographic camera into a depth texture
+// that covers the whole arena. SHADOW_SCENE_TOP bounds the tallest
+// object (3 stories + lamp + fan) so nothing is clipped.
+const int SHADOW_MAP_SIZE = 4096;
+const float SHADOW_SCENE_TOP = 10.0f;
+bool g_shadows = true;
+GLuint g_shadow_fbo = 0;
+GLuint g_shadow_tex = 0;
+GLuint g_dummy_depth_tex = 0; // 1x1, bound while the real map is a target
+static Matrix4f g_light_view;
+static Matrix4f g_light_proj;
+GLint g_light_vp_location = -1;
+GLint g_shadow_map_location = -1;
+GLint g_use_shadows_location = -1;
+GLint g_depth_pass_location = -1;
+GLint g_shadow_texel_location = -1;
+
 // section 3: world state data structures
 
 //
@@ -491,6 +509,60 @@ static void create_shader_program()
 
   // set texture sampler to use texture unit 0
   glUniform1i(g_texture_location, 0);
+
+  // shadow uniforms; the shadow map lives on texture unit 1
+  g_light_vp_location = glGetUniformLocation(g_shader_program, "uLightVP");
+  g_shadow_map_location = glGetUniformLocation(g_shader_program, "uShadowMap");
+  g_use_shadows_location =
+      glGetUniformLocation(g_shader_program, "uUseShadows");
+  g_depth_pass_location = glGetUniformLocation(g_shader_program, "uDepthPass");
+  g_shadow_texel_location =
+      glGetUniformLocation(g_shader_program, "uShadowTexel");
+  glUniform1i(g_shadow_map_location, 1);
+  glUniform2f(g_shadow_texel_location, 1.0f / SHADOW_MAP_SIZE,
+              1.0f / SHADOW_MAP_SIZE);
+}
+
+// a depth texture plus a framebuffer that writes only depth into it.
+// compare mode makes texture() in the shader return the result of the
+// depth test instead of the depth, and linear filtering blends the
+// test over the 4 nearest texels. outside the map everything is lit.
+static GLuint make_depth_texture(int size)
+{
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, size, size, 0,
+               GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+  const float border[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE,
+                  GL_COMPARE_REF_TO_TEXTURE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+  return tex;
+}
+
+static void create_shadow_map()
+{
+  g_shadow_tex = make_depth_texture(SHADOW_MAP_SIZE);
+  g_dummy_depth_tex = make_depth_texture(1);
+
+  glGenFramebuffers(1, &g_shadow_fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, g_shadow_fbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
+                         g_shadow_tex, 0);
+  glDrawBuffer(GL_NONE);
+  glReadBuffer(GL_NONE);
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+  {
+    std::cerr << "shadow framebuffer is incomplete, shadows disabled\n";
+    g_shadows = false;
+  }
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 // section 5: geometry creation
@@ -1724,17 +1796,10 @@ static void upload_view_proj()
   glUniformMatrix4fv(g_proj_location, 1, GL_TRUE, &g_proj_matrix.m[0][0]);
 }
 
-static void upload_lighting()
+// unit vector from the center of the world toward the sun (or moon)
+static Vector3f celestial_direction()
 {
-  // celestial arc based lighting
-  // the sun's position along the arc determines the light direction.
-  // day_factor is based on the arc height (peaks at the middle).
-  // when its the moon's turn, lighting is very dim.
-  float arc_height = sin(M_PI * g_celestial_progress); // 0 at edges, 1 at peak
-  float day_factor = g_celestial_is_sun ? arc_height : 0.0f;
-
-  // compute sun direction from the celestial body's position
-  // toward the center of the world
+  float arc_height = sin(M_PI * g_celestial_progress);
   float cel_x = CELESTIAL_START_X +
                 g_celestial_progress * (CELESTIAL_END_X - CELESTIAL_START_X);
   float cel_y = CELESTIAL_MAX_Y * arc_height;
@@ -1751,8 +1816,20 @@ static void upload_lighting()
     dir_y /= dir_len;
     dir_z /= dir_len;
   }
+  return Vector3f(dir_x, dir_y, dir_z);
+}
 
-  glUniform3f(g_light_dir_location, dir_x, dir_y, dir_z);
+static void upload_lighting()
+{
+  // celestial arc based lighting
+  // the sun's position along the arc determines the light direction.
+  // day_factor is based on the arc height (peaks at the middle).
+  // when its the moon's turn, lighting is very dim.
+  float arc_height = sin(M_PI * g_celestial_progress); // 0 at edges, 1 at peak
+  float day_factor = g_celestial_is_sun ? arc_height : 0.0f;
+
+  Vector3f dir = celestial_direction();
+  glUniform3f(g_light_dir_location, dir.x, dir.y, dir.z);
 
   // sun light color: warm white scaled by day factor
   // moon provides a very faint bluish ambient only
@@ -2574,6 +2651,85 @@ static void draw_humans()
 
 static void draw_hud();
 
+// the sun camera looks along -dir. its orthographic box is the smallest
+// one, in the sun's view space, that holds the 8 corners of the arena
+// box, so the shadow map covers the scene and nothing more.
+static void compute_light_matrices(const Vector3f &dir)
+{
+  Vector3f fwd(-dir.x, -dir.y, -dir.z);
+  Vector3f up = fabs(fwd.y) > 0.99f ? Vector3f(0.0f, 0.0f, 1.0f)
+                                    : Vector3f(0.0f, 1.0f, 0.0f);
+  Matrix4f rot;
+  rot.InitCameraTransform(fwd, up);
+  g_light_view = rot * make_translate(-TRACK_CX, 0.0f, -TRACK_CZ);
+
+  float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+  const float xs[2] = {-1.0f, ARENA_WIDTH + 1.0f};
+  const float ys[2] = {-0.1f, SHADOW_SCENE_TOP};
+  const float zs[2] = {-1.0f, ARENA_DEPTH + 1.0f};
+  for (float x : xs)
+    for (float y : ys)
+      for (float z : zs)
+      {
+        Vector4f v = g_light_view * Vector4f(x, y, z, 1.0f);
+        float c[3] = {v.x, v.y, v.z};
+        for (int k = 0; k < 3; k++)
+        {
+          lo[k] = std::min(lo[k], c[k]);
+          hi[k] = std::max(hi[k], c[k]);
+        }
+      }
+  float l = lo[0], r = hi[0], b = lo[1], t = hi[1];
+  float n = lo[2] - 1.0f, f = hi[2] + 1.0f;
+  g_light_proj = Matrix4f(2.0f / (r - l), 0.0f, 0.0f, -(r + l) / (r - l),
+                          0.0f, 2.0f / (t - b), 0.0f, -(t + b) / (t - b),
+                          0.0f, 0.0f, 2.0f / (f - n), -(f + n) / (f - n),
+                          0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+static void draw_world(bool with_celestial)
+{
+  draw_ground();
+  draw_track();
+  draw_walls();
+  draw_buildings();
+  draw_car();
+  draw_ai_cars();
+  draw_street_lights();
+  if (with_celestial)
+    draw_celestial();
+  draw_trees();
+  draw_humans();
+}
+
+// depth only render of the world from the sun into the shadow map
+static void render_shadow_pass()
+{
+  compute_light_matrices(celestial_direction());
+
+  // the shadow texture is the render target now, so it must not also
+  // be bound for sampling. the shader still declares a depth sampler on
+  // unit 1, so a 1x1 stand-in keeps the driver happy.
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_2D, g_dummy_depth_tex);
+  glActiveTexture(GL_TEXTURE0);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, g_shadow_fbo);
+  glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+  glClear(GL_DEPTH_BUFFER_BIT);
+  glUniform1i(g_depth_pass_location, 1);
+  glUniformMatrix4fv(g_view_location, 1, GL_TRUE, &g_light_view.m[0][0]);
+  glUniformMatrix4fv(g_proj_location, 1, GL_TRUE, &g_light_proj.m[0][0]);
+
+  // push stored depths slightly away from the sun so lit surfaces do
+  // not shadow themselves
+  glEnable(GL_POLYGON_OFFSET_FILL);
+  glPolygonOffset(2.0f, 4.0f);
+  draw_world(false); // the sun itself casts no shadow
+  glDisable(GL_POLYGON_OFFSET_FILL);
+  glUniform1i(g_depth_pass_location, 0);
+}
+
 static void render_frame()
 {
   // sky color: blue during day, dark at night
@@ -2583,6 +2739,18 @@ static void render_frame()
   float sky_g = 0.08f + 0.52f * day_factor;
   float sky_b = 0.15f + 0.65f * day_factor;
   glClearColor(sky_r, sky_g, sky_b, 1.0f);
+
+  // shadows only matter while the sun is up
+  glUseProgram(g_shader_program);
+  bool shadows = g_shadows && day_factor > 0.0f;
+  if (shadows)
+    render_shadow_pass();
+  glUniform1i(g_use_shadows_location, shadows ? 1 : 0);
+  Matrix4f light_vp = g_light_proj * g_light_view;
+  glUniformMatrix4fv(g_light_vp_location, 1, GL_TRUE, &light_vp.m[0][0]);
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_2D, shadows ? g_shadow_tex : g_dummy_depth_tex);
+  glActiveTexture(GL_TEXTURE0);
 
   glBindFramebuffer(GL_FRAMEBUFFER, g_target_fbo);
   glViewport(0, 0, g_fb_w, g_fb_h);
@@ -2595,16 +2763,7 @@ static void render_frame()
   upload_lighting();
 
   // draw every part of the world
-  draw_ground();
-  draw_track();
-  draw_walls();
-  draw_buildings();
-  draw_car();
-  draw_ai_cars();
-  draw_street_lights();
-  draw_celestial();
-  draw_trees();
-  draw_humans();
+  draw_world(true);
 
   if (g_show_hud)
     draw_hud();
@@ -2627,6 +2786,7 @@ static void draw_hud()
   ImGui::Text("Car Speed: %.1f", g_car.speed);
   ImGui::Text("Car Heading: %.1f deg", g_car.heading_deg);
   ImGui::Text("Fan RPM: %.0f", g_fan_rpm);
+  ImGui::Text("Shadows: %s", g_shadows ? "on" : "off");
 
   // show time of day
   // show time of day based on celestial state
@@ -2652,6 +2812,7 @@ static void draw_hud()
     ImGui::Text("3              : Ground view (arrows to pan)");
     ImGui::Text("4 to 8         : Light source view (per building)");
     ImGui::Text("9              : Helicopter cam");
+    ImGui::Text("o              : Sun shadows on / off");
     ImGui::Text("n              : Reset world");
     ImGui::Text("Escape         : Quit");
   }
@@ -2773,6 +2934,10 @@ static void key_callback(GLFWwindow *window, int key, int scancode, int action,
     }
   }
 
+  // sun shadows on and off with 'o'
+  if (key == GLFW_KEY_O && action == GLFW_PRESS)
+    g_shadows = !g_shadows;
+
   // reset the world with 'n'
   if (key == GLFW_KEY_N && action == GLFW_PRESS)
   {
@@ -2845,13 +3010,15 @@ struct Options
   float drive = 0.0f;         // initial car speed
   float sun = -1.0f;          // sun progress 0..1 (negative keeps the default)
   float moon = -1.0f;         // moon progress 0..1
+  int shadows = 1;
   int width = 1600, height = 900;
 };
 
 static void usage()
 {
   cerr << "usage: car_world [--shot out.png] [--camera 0-8] [--seconds t]\n"
-          "                 [--drive speed] [--sun p | --moon p] [--size WxH]\n";
+          "                 [--drive speed] [--sun p | --moon p] [--size WxH]\n"
+          "                 [--shadows 0|1]\n";
 }
 
 static bool parse_options(int argc, char *argv[], Options &o)
@@ -2874,6 +3041,8 @@ static bool parse_options(int argc, char *argv[], Options &o)
       o.sun = float(atof(v));
     else if (a == "--moon")
       o.moon = float(atof(v));
+    else if (a == "--shadows")
+      o.shadows = atoi(v);
     else if (a == "--size")
     {
       if (sscanf(v, "%dx%d", &o.width, &o.height) != 2)
@@ -2889,6 +3058,7 @@ static bool parse_options(int argc, char *argv[], Options &o)
 static void apply_options(const Options &o)
 {
   g_current_camera = o.camera;
+  g_shadows = g_shadows && o.shadows != 0;
   g_car.speed = o.drive;
   const float step = 1.0f / 60.0f;
   for (float t = 0.0f; t < o.seconds; t += step)
@@ -2980,6 +3150,9 @@ int main(int argc, char *argv[])
   create_shader_program();
   create_geometry();
   load_textures();
+  create_shadow_map();
+  g_light_view.InitIdentity();
+  g_light_proj.InitIdentity();
   init_world();
   apply_options(opt);
 

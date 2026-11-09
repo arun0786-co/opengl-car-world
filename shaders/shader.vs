@@ -50,10 +50,14 @@ uniform mat4 gModel;
 uniform mat4 gView;
 uniform mat4 gProj;
 
+// sun shadow map: projection * view of the sun's orthographic camera
+uniform mat4 uLightVP;
+
 // outputs to the fragment shader (interpolated across the triangle)
 out vec3 fragNormal;     // normal in world space, for lighting
 out vec3 fragWorldPos;   // position in world space, for point lights
 out vec2 fragTexCoord;   // texture coordinate, for building textures
+out vec4 fragLightPos;   // position in the sun's clip space, for shadows
 
 void main()
 {
@@ -76,4 +80,7 @@ void main()
     // pass through the texture coordinate unchanged.
     // the gpu will interpolate it across the triangle for us.
     fragTexCoord = TexCoord;
+
+    // where this vertex lands in the shadow map
+    fragLightPos = uLightVP * vec4(fragWorldPos, 1.0);
 }
