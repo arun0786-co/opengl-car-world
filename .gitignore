@@ -1,0 +1,6 @@
+*.o
+*.d
+/car_world
+imgui.ini
+.DS_Store
+/shots/
