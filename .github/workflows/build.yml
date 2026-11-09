@@ -11,6 +11,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libglew-dev libglfw3-dev zlib1g-dev xvfb libgl1-mesa-dri
       - name: build
         run: make -j4
+      - name: test
+        run: make test
       - name: render one frame with software opengl
         env:
           LIBGL_ALWAYS_SOFTWARE: 1
@@ -30,3 +32,5 @@ jobs:
         run: brew install glew glfw
       - name: build
         run: make -j4
+      - name: test
+        run: make test
