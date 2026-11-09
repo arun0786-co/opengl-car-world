@@ -53,6 +53,7 @@
 
 #include "file_utils.h"
 #include "math_utils.h"
+#include "png.h"
 #include "textures.h"
 
 using namespace std;
@@ -229,6 +230,12 @@ GLuint g_tex_stone = 0;
 // view and projection matrices (computed once per frame)
 static Matrix4f g_view_matrix;
 static Matrix4f g_proj_matrix;
+
+// where a frame is drawn: the window (fbo 0) or an offscreen
+// framebuffer when capturing a png, and its size in pixels
+GLuint g_target_fbo = 0;
+int g_fb_w = 1280, g_fb_h = 720;
+bool g_show_hud = true;
 
 // section 3: world state data structures
 
@@ -1520,8 +1527,7 @@ static void update_game(float dt)
 
 static void setup_projection_matrix()
 {
-  int fbw = 0, fbh = 0;
-  glfwGetFramebufferSize(g_window, &fbw, &fbh);
+  int fbw = g_fb_w, fbh = g_fb_h;
   if (fbw <= 0 || fbh <= 0)
     return;
 
@@ -2566,6 +2572,8 @@ static void draw_humans()
 // i enable depth testing so closer objects occlude farther ones.
 // the sky color changes with the day/night cycle.
 
+static void draw_hud();
+
 static void render_frame()
 {
   // sky color: blue during day, dark at night
@@ -2576,6 +2584,8 @@ static void render_frame()
   float sky_b = 0.15f + 0.65f * day_factor;
   glClearColor(sky_r, sky_g, sky_b, 1.0f);
 
+  glBindFramebuffer(GL_FRAMEBUFFER, g_target_fbo);
+  glViewport(0, 0, g_fb_w, g_fb_h);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   glUseProgram(g_shader_program);
 
@@ -2596,7 +2606,13 @@ static void render_frame()
   draw_trees();
   draw_humans();
 
-  // imgui heads up display
+  if (g_show_hud)
+    draw_hud();
+}
+
+// imgui heads up display
+static void draw_hud()
+{
   ImGui_ImplOpenGL3_NewFrame();
   ImGui_ImplGlfw_NewFrame();
   ImGui::NewFrame();
@@ -2774,7 +2790,7 @@ static void key_callback(GLFWwindow *window, int key, int scancode, int action,
 //       render_frame()
 //       swap buffers and poll input
 
-static bool init_glfw_and_window(int width, int height)
+static bool init_glfw_and_window(int width, int height, bool visible)
 {
   if (!glfwInit())
   {
@@ -2786,6 +2802,7 @@ static bool init_glfw_and_window(int width, int height)
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
   glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+  glfwWindowHint(GLFW_VISIBLE, visible ? GLFW_TRUE : GLFW_FALSE);
 
   g_window = glfwCreateWindow(width, height, g_program_title, nullptr, nullptr);
   if (!g_window)
@@ -2817,12 +2834,140 @@ static bool init_glew()
   return true;
 }
 
+// command line options. with --shot the world is simulated for a fixed
+// number of seconds, one frame is drawn into an offscreen framebuffer
+// and saved as a png, and the program exits without opening a window.
+struct Options
+{
+  const char *shot = nullptr; // png path
+  int camera = 0;             // 0 to 8, same order as the number keys
+  float seconds = 0.0f;       // simulated time before the frame is taken
+  float drive = 0.0f;         // initial car speed
+  float sun = -1.0f;          // sun progress 0..1 (negative keeps the default)
+  float moon = -1.0f;         // moon progress 0..1
+  int width = 1600, height = 900;
+};
+
+static void usage()
+{
+  cerr << "usage: car_world [--shot out.png] [--camera 0-8] [--seconds t]\n"
+          "                 [--drive speed] [--sun p | --moon p] [--size WxH]\n";
+}
+
+static bool parse_options(int argc, char *argv[], Options &o)
+{
+  for (int i = 1; i < argc; i++)
+  {
+    std::string a = argv[i];
+    if (i + 1 >= argc)
+      return false;
+    const char *v = argv[++i];
+    if (a == "--shot")
+      o.shot = v;
+    else if (a == "--camera")
+      o.camera = atoi(v);
+    else if (a == "--seconds")
+      o.seconds = float(atof(v));
+    else if (a == "--drive")
+      o.drive = float(atof(v));
+    else if (a == "--sun")
+      o.sun = float(atof(v));
+    else if (a == "--moon")
+      o.moon = float(atof(v));
+    else if (a == "--size")
+    {
+      if (sscanf(v, "%dx%d", &o.width, &o.height) != 2)
+        return false;
+    }
+    else
+      return false;
+  }
+  return o.camera >= 0 && o.camera < NUM_CAMERAS && o.width > 0 &&
+         o.height > 0;
+}
+
+static void apply_options(const Options &o)
+{
+  g_current_camera = o.camera;
+  g_car.speed = o.drive;
+  const float step = 1.0f / 60.0f;
+  for (float t = 0.0f; t < o.seconds; t += step)
+    update_game(step);
+  if (o.sun >= 0.0f)
+  {
+    g_celestial_is_sun = true;
+    g_celestial_progress = o.sun;
+  }
+  else if (o.moon >= 0.0f)
+  {
+    g_celestial_is_sun = false;
+    g_celestial_progress = o.moon;
+  }
+}
+
+// draws one frame into an offscreen framebuffer and writes it as a png
+static bool capture_png(const char *path, int w, int h)
+{
+  GLuint fbo = 0, color = 0, depth = 0;
+  glGenFramebuffers(1, &fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  glGenRenderbuffers(1, &color);
+  glBindRenderbuffer(GL_RENDERBUFFER, color);
+  glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
+  glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                            GL_RENDERBUFFER, color);
+  glGenRenderbuffers(1, &depth);
+  glBindRenderbuffer(GL_RENDERBUFFER, depth);
+  glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+  glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                            GL_RENDERBUFFER, depth);
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+  {
+    cerr << "offscreen framebuffer is incomplete\n";
+    return false;
+  }
+
+  g_target_fbo = fbo;
+  g_fb_w = w;
+  g_fb_h = h;
+  g_show_hud = false;
+  render_frame();
+  glFinish();
+
+  std::vector<uint8_t> pixels(size_t(w) * h * 3), flipped(pixels.size());
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+  // opengl rows start at the bottom, png rows at the top
+  for (int y = 0; y < h; y++)
+    std::copy(pixels.begin() + size_t(h - 1 - y) * w * 3,
+              pixels.begin() + size_t(h - y) * w * 3,
+              flipped.begin() + size_t(y) * w * 3);
+
+  glDeleteRenderbuffers(1, &color);
+  glDeleteRenderbuffers(1, &depth);
+  glDeleteFramebuffers(1, &fbo);
+  g_target_fbo = 0;
+
+  if (!png::write_rgb(path, flipped.data(), w, h))
+  {
+    cerr << "could not write " << path << "\n";
+    return false;
+  }
+  cout << "wrote " << path << " (" << w << "x" << h << ")\n";
+  return true;
+}
+
 int main(int argc, char *argv[])
 {
-  (void)argc;
-  (void)argv;
+  Options opt;
+  if (!parse_options(argc, argv, opt))
+  {
+    usage();
+    return EXIT_FAILURE;
+  }
 
-  if (!init_glfw_and_window(1280, 720))
+  if (!init_glfw_and_window(1280, 720, opt.shot == nullptr))
   {
     return EXIT_FAILURE;
   }
@@ -2836,6 +2981,14 @@ int main(int argc, char *argv[])
   create_geometry();
   load_textures();
   init_world();
+  apply_options(opt);
+
+  if (opt.shot)
+  {
+    bool ok = capture_png(opt.shot, opt.width, opt.height);
+    glfwTerminate();
+    return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+  }
 
   // imgui setup
   IMGUI_CHECKVERSION();
@@ -2851,6 +3004,7 @@ int main(int argc, char *argv[])
   {
     float dt = get_delta_time();
     update_game(dt);
+    glfwGetFramebufferSize(g_window, &g_fb_w, &g_fb_h);
     render_frame();
 
     glfwSwapBuffers(g_window);

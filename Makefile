@@ -8,7 +8,7 @@ UNAME := $(shell uname -s)
 ifeq ($(UNAME),Darwin)
   BREW     := $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
   CXXFLAGS += -I$(BREW)/include -DGL_SILENCE_DEPRECATION
-  LDLIBS   += -L$(BREW)/lib -lGLEW -lglfw -framework OpenGL
+  LDLIBS   += -L$(BREW)/lib -lGLEW -lglfw -lz -framework OpenGL
 else
   LDLIBS   += -lGLEW -lglfw -lGL -lz
 endif
