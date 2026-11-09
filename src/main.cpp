@@ -1915,10 +1915,12 @@ static void upload_lighting()
 
   // sun light color: warm white scaled by day factor
   // moon provides a very faint bluish ambient only
-  float moon_factor = g_celestial_is_sun ? 0.0f : arc_height * 0.15f;
-  glUniform3f(g_light_color_location, 1.0f * day_factor + 0.05f * moon_factor,
-              0.95f * day_factor + 0.08f * moon_factor,
-              0.85f * day_factor + 0.15f * moon_factor);
+  // the moon is a weak blue directional light, so the night scene keeps
+  // its shapes (and its shadows) outside the lamp cones
+  float moon_factor = g_celestial_is_sun ? 0.0f : arc_height;
+  glUniform3f(g_light_color_location, 1.0f * day_factor + 0.22f * moon_factor,
+              0.95f * day_factor + 0.26f * moon_factor,
+              0.85f * day_factor + 0.40f * moon_factor);
 
   // camera position for specular
   glUniform3f(g_camera_pos_location, g_camera_eye.x, g_camera_eye.y,
@@ -2724,7 +2726,7 @@ static void draw_humans()
 
 static void draw_hud();
 
-// the sun camera looks along -dir. its orthographic box is the smallest
+// the sun (or moon) camera looks along -dir. its orthographic box is the smallest
 // one, in the sun's view space, that holds the 8 corners of the arena
 // box, so the shadow map covers the scene and nothing more.
 static void compute_light_matrices(const Vector3f &dir)
@@ -2813,9 +2815,9 @@ static void render_frame()
   float sky_b = 0.15f + 0.65f * day_factor;
   glClearColor(sky_r, sky_g, sky_b, 1.0f);
 
-  // shadows only matter while the sun is up
+  // shadows only matter while the sun or the moon is above the horizon
   glUseProgram(g_shader_program);
-  bool shadows = g_shadows && day_factor > 0.0f;
+  bool shadows = g_shadows && arc_h > 0.0f;
   if (shadows)
     render_shadow_pass();
   glUniform1i(g_use_shadows_location, shadows ? 1 : 0);
