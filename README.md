@@ -20,6 +20,10 @@ At night only the moon, the street lamps and the coloured building lamps light t
 
 ![night](docs/img/night.jpg)
 
+The same night from the lamp on one building (key 5). The coloured patches on the road come from the building spotlights, and the brighter grass around the posts from the street lamps:
+
+![lamp view at night](docs/img/lamp_night.jpg)
+
 ## Build and run
 
 ```bash
@@ -48,6 +52,12 @@ Run it from the repository root, since shaders are loaded from `shaders/`.
 | o | shadows on / off |
 | n | reset after a crash |
 
+The sky view (key 1) shows the whole track and the sun shadows; the orbit view (key 0) circles the town, here late in the afternoon:
+
+| sky view | orbit view |
+|---|---|
+| ![sky view](docs/img/sky.jpg) | ![orbit view](docs/img/orbit.jpg) |
+
 ## Headless frames
 
 `--shot` simulates the world for a fixed time at 60 steps per second, draws one frame into an offscreen framebuffer and writes a PNG without opening a window. Every image in this README was made this way:
@@ -57,6 +67,8 @@ Run it from the repository root, since shaders are loaded from `shaders/`.
 ./car_world --shot night.png --camera 9 --orbit 205 --moon 0.4 --seconds 2 --drive 2
 ./car_world --bench 600 --camera 8 --sun 0.3 --shadows 0    # mean ms per frame
 ```
+
+`scripts/make_shots.sh` renders the sky, orbit and lamp frames.
 
 `--sun` and `--moon` set how far the body has crossed the sky, from 0 to 1.
 
